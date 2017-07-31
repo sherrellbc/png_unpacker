@@ -40,36 +40,20 @@ const char *g_png_filter_methods[] =
         [0] = "Adaptive Filtering with 5 basic filter types"
     };
 
+const char *g_png_filter_types[] =
+    {
+        [0] = "None",
+        [1] = "Sub",
+        [2] = "Up",
+        [3] = "Average",
+        [4] = "Paeth"
+    };
+
 const char *g_png_interlace_methods[] =
     {
         [0] = "None",
         [1] = "Adam7"
     };
-
-/* zlib constants as defined by the specification (RFC1950) */
-const char *g_zlib_comp_methods[] =
-    {
-        [8]  = "Deflate/Inflate",
-        [15] = "Reserved"
-    };
-
-const char *g_zlib_flevels[] =
-    {
-        [0] = "Fastest",
-        [1] = "Fast",
-        [2] = "Default",
-        [3] = "Max compression; slowest"
-    };
-
-const char *g_zlib_deflate_comp_modes[] =
-    {
-        [0] = "No Compression",
-        [1] = "Compressed with fixed/static Huffman codes",
-        [2] = "Compressed with dynamic (encoded) Huffman codes",
-        [3] = "Reserved; ERROR"
-    };
-
-const char *g_common_invalid_str = "INVALID! ERROR";
 
 struct png_hdr {
     uint32_t magic;
@@ -106,6 +90,36 @@ struct chunk_plte {
     }pentry[0];
 } __attribute__((packed));
 
+struct png_img {
+    struct chunk_ihdr *ihdr;
+    uint8_t *data;
+    uint8_t *data_next;     /* A pointer into the data buffer indictating the next available slot */
+    int buf_len;          /* Total available length in data buffer */
+    int data_len;           /* Currently _used_ length in data buffer */
+};
+
+/* zlib constants as defined by the specification (RFC1950) */
+const char *g_zlib_comp_methods[] =
+    {
+        [8]  = "Deflate/Inflate",
+        [15] = "Reserved"
+    };
+
+const char *g_zlib_flevels[] =
+    {
+        [0] = "Fastest",
+        [1] = "Fast",
+        [2] = "Default",
+        [3] = "Max compression; slowest"
+    };
+
+const char *g_zlib_deflate_comp_modes[] =
+    {
+        [0] = "No Compression",
+        [1] = "Compressed with fixed/static Huffman codes",
+        [2] = "Compressed with dynamic (encoded) Huffman codes",
+        [3] = "Reserved; ERROR"
+    };
 
 struct zlib_hdr {
     struct {
@@ -142,29 +156,22 @@ struct zlib_hdr {
 //    uint8_t adler32; /* Although present, it comes after the variable number of data_blocks above */
 } __attribute__((packed));
 
-//struct zlib_deflate_data {
-//    union {
-//        uint8_t data; 
-//        struct {
-//        /*
-//         * BFINAL (Final block)         : 0
-//         * BTYPE  (Type of compression) : 1:2
-//         */
-//            uint8_t bfinal:1, btype:2, :5;
-//        };
-//    };
-//} __attribute__((packed));
-
+/* Common data */
+const char *g_common_invalid_str = "INVALID! ERROR";
 
 uint32_t swap32(uint32_t val);
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 inline uint32_t swap32(uint32_t val)
 {
     val = ((val << 8) & 0xFF00FF00 ) | ((val >> 8) & 0xFF00FF ); 
     return (val << 16) | (val >> 16);
 }
+#else
+inline uint32_t swap32(uint32_t val){ return val };
+#endif
 
-
-int is_png(void *img)
+int is_png(void *img);
+inline int is_png(void *img)
 {
     return (PNG_HDR_SIG == ((struct png_hdr *)img)->magic);
 }
@@ -208,7 +215,7 @@ int png_prepare(const char *file, int *fd, void **img, size_t *len)
 }
 
 
-int png_process_idhr(struct chunk_hdr *chunk, uint8_t **buf, int *len)
+int png_process_ihdr(struct chunk_hdr *chunk, struct png_img *png)
 {
     struct chunk_ihdr *ihdr = (struct chunk_ihdr *)chunk->data;
 
@@ -222,13 +229,16 @@ int png_process_idhr(struct chunk_hdr *chunk, uint8_t **buf, int *len)
     printf("\tInterlaceMethod :\t%u\t%s\n", ihdr->interlace_method, g_png_interlace_methods[ihdr->interlace_method]);
 
     /* Based on what we know about the image, roughly allocate enough memory for it */
-    *len = swap32(ihdr->width)*swap32(ihdr->height)*5;    /* 3 for RGB and 2 extra for growth room */
-    *buf = malloc(*len);
-    if(NULL == *buf)
+    png->ihdr = ihdr;
+    png->buf_len = swap32(ihdr->width)*swap32(ihdr->height)*5;    /* 3 for RGB and 2 extra for growth room */
+    png->data = malloc(png->buf_len);
+    if(NULL == png->data)
         return -1;   
 
-    memset(*buf, 0, *len);    
-    printf("Allocated %d bytes\n", *len);
+    memset(png->data, 0, png->buf_len);
+    png->data_next = png->data;
+    png->data_len = 0;
+    printf("Allocated %d bytes\n", png->buf_len);
     return 0;
 }
 
@@ -284,13 +294,30 @@ int png_inflate_chunk(uint8_t *dest, int dlen, uint8_t *src, int slen)
 }
 
 
-int png_process_idat(struct chunk_hdr *chunk, uint8_t *buf, int len)
+int png_unfilter(uint8_t *buf, int inflate_len, int img_width)
+{
+    printf("Unfilter not yet implemented\n");
+    return inflate_len;
+//    int i;
+//    int scanline_count = swap32(img_width)+1;
+//    uint8_t (*img)[scanline_count] = (uint8_t(*)[scanline_count]) buf;
+//
+//    printf("Width: %d\n", img_width);
+//    for(i=0; i<10; i++){
+//        printf("Line %4d: FilterType[%d]=%s\n", i, img[i][0], g_png_filter_types[img[i][0]]);
+//    }
+//
+//    return 0;
+}
+
+
+int png_process_idat(struct chunk_hdr *chunk, struct png_img *png)
 {
     static int is_first_idat = 1;
     struct zlib_hdr *zhdr = (struct zlib_hdr *)chunk->data;
     struct zlib_deflate_data *zdeflate = ((struct zlib_deflate_data *) &zhdr->data_blocks[0]);
 
-    int inflate_len;
+    int inflate_len, unfiltered_len;
     uint32_t adler;
     uint32_t adler_ref = *(uint32_t*)(((void*)zhdr)+swap32(chunk->len)-4);  /* -4 to get to the start of the adler32 checksum in the buffer */
     uint32_t crc; 
@@ -331,18 +358,13 @@ int png_process_idat(struct chunk_hdr *chunk, uint8_t *buf, int len)
         printf("\t\tFLEVEL (2):\t0x%.2x\t%s\n", flevel,
             (flevel < sizeof(g_zlib_flevels)/sizeof(char*)) ? g_zlib_flevels[flevel] : g_common_invalid_str);
     }else
-        printf("Appending bytes to previous IDAT block\n"); //TODO: This is not actually implemented (FAIL if > 1 IDAT chunk)
+        printf("ERROR: Should append bytes to previous IDAT block\n"); //TODO: This is not actually implemented (FAIL if > 1 IDAT chunk)
 
-
-    /* 
-     * -- Actual nested image data --
-     * How is this current data block compressed?
-     * Is this the final data block?
-     */
+    /* Actual nested image data */
     printf("\n\t\tDataBlocks (%d bytes)\n", swap32(chunk->len));
 
     /* Inflate the data block of the current IDAT chunk */
-    inflate_len = png_inflate_chunk(buf, len, (uint8_t *) zhdr, swap32(chunk->len));
+    inflate_len = png_inflate_chunk(png->data_next, png->buf_len - png->data_len, (uint8_t *) zhdr, swap32(chunk->len));
     if(-1 == inflate_len){
         printf("Error occurred while inflating .. \n");
         return -1;
@@ -350,7 +372,7 @@ int png_process_idat(struct chunk_hdr *chunk, uint8_t *buf, int len)
 
     /* Verify Adler32 of inflated data (returned as big-endian) */   
     adler = adler32(0, Z_NULL, 0);
-    adler = adler32(adler, buf, inflate_len);
+    adler = adler32(adler, png->data_next, inflate_len);
     if(adler_ref != swap32(adler)){
         printf("Invalid deflate Adler32; ERROR!\n");
         return -1;
@@ -359,7 +381,21 @@ int png_process_idat(struct chunk_hdr *chunk, uint8_t *buf, int len)
     printf("\t\t\tInflated data length :\t%d\n", inflate_len);
     printf("\t\t\tCompression Ratio    :\t%.2f\n", inflate_len/(float)swap32(chunk->len));
 
-    //TODO: Parse/remove filters
+    /* FIXME: Debug dump of the buffer */
+//    printf("\n\n");
+//    for(int i=0; i<inflate_len; i++)
+//        printf("%0.2x ", png->data_next[i]);
+//    printf("\n");
+
+    /* Parse/remove filters and any associated encoding data; return _actual_ data length consumed */
+    unfiltered_len = png_unfilter(png->data_next, inflate_len, png->ihdr->width);
+    if(0 != unfiltered_len) 
+        return -1;
+    
+    /* Validation checks out; update our location pointers and length meta data */
+    png->data_next = (uint8_t *)(((void *)png->data) + unfiltered_len);
+    png->data_len += unfiltered_len;
+    //FIXME: Resize check here
 
     is_first_idat = 0;
     return 0;
@@ -404,15 +440,15 @@ int png_walk(struct png_hdr *png, struct chunk_list *chunks)
 
 int png_process_chunks(struct chunk_list *chunks)
 {
-    uint8_t *buf;
-    int i, len;
+    struct png_img png = {0};
+    int i;
     int ret = 0;
     
     /* Process each discovered chunk */
     for(i=0; i<chunks->count; i++){
         switch(chunks->addrs[i]->type){
             case PNG_CHUNK_IHDR:
-                ret = png_process_idhr(chunks->addrs[i], &buf, &len);
+                ret = png_process_ihdr(chunks->addrs[i], &png);
                 break;
 
             case PNG_CHUNK_PLTE:
@@ -420,7 +456,7 @@ int png_process_chunks(struct chunk_list *chunks)
                 break;
         
             case PNG_CHUNK_IDAT:
-                ret = png_process_idat(chunks->addrs[i], buf, len);
+                ret = png_process_idat(chunks->addrs[i], &png); 
                 break;
 
             case PNG_CHUNK_IEND:
@@ -439,7 +475,7 @@ int png_process_chunks(struct chunk_list *chunks)
     }
 
     //FIXME: Freeing for now to prevent memory leak, but what to do with buf here?
-    free(buf);
+    free(png.data);
     return ret;
 }
 
