@@ -50,6 +50,14 @@ const char *g_png_filter_types[] =
         [4] = "Paeth"
     };
 
+enum png_filter_type {
+    PNG_FILTER_NONE = 0,
+    PNG_FILTER_SUB,
+    PNG_FILTER_UP,
+    PNG_FILTER_AVERAGE,
+    PNG_FILTER_PAETH,
+};
+
 const char *g_png_interlace_methods[] =
     {
         [0] = "None",
@@ -198,11 +206,11 @@ inline int is_png(void *img)
 int png_print_data(struct png_img *png, int offset, int len)
 {
     uint8_t *buf = (uint8_t *) (((void *)png->data + offset));
-    int modulo = swap32(png->ihdr->width);
+    int width = swap32(png->ihdr->width);
     int i, line;
 
     for(i=0,line=0; i<len; i+=3){
-        if(0 == i%modulo){
+        if(0 == i%width){
             printf("\n[%d]\t", line++);
         }
 
@@ -347,19 +355,65 @@ int png_inflate_chunk(uint8_t *dest, int dlen, uint8_t *src, int slen)
  * @param len         : Length of buffer data to unfilter
  * @param img_width   : Column width for the final image
  * @return            : New length of data after removing filter encodings
+ * 
+ * Notes: If multiple IDAT structures are being appended, this function is likely to be
+ * called more than once. However, its current implementation does not support this as
+ * it will be necessary to know if the current subsection of the image (some series of lines)
+ * is the image's true line zero. This line index has special implications for unfiltering
  */
 int png_unfilter(uint8_t *buf, int len, int img_width)
 {
     int i;
-    int encoded_width = img_width*3+1;   /* +1 byte for encoded filter type */
+    int encoded_width = img_width*3+1;   /* +1 byte for encoded filter type; x3 for RGB color space */
     int line_count = len/encoded_width;
+    uint8_t filter_type;
     uint8_t (*img)[encoded_width] = (uint8_t(*)[encoded_width]) buf;
+    uint8_t (*unfiltered_img)[encoded_width-1] = (uint8_t(*)[encoded_width-1]) buf;
 
-    /* We assume the color space is RGB with 8-bit depth for simplicity */
     printf("Line filter modes:\n");
     for(i=0; i<line_count; i++){   
-        printf("Line %4d: FilterType[%d]=%s\n", i, img[i][0], g_png_filter_types[img[i][0]]);
+        filter_type = img[i][0];
+        printf("Line %4d: FilterType[%d]=", i, img[i][0]);
+
+        /* Check for invalid filter types (indicates malformed encodiung */
+        if(filter_type >= sizeof(g_png_filter_types)/sizeof(char*)){
+            printf("%s\n", g_common_invalid_str);
+            return -1;
+        }
+        printf("%s\n", g_png_filter_types[img[i][0]]);
+
+        /* Copy the filtered data over top the filter encoding byte to realign (suboptimal, but easier access) */
         memmove(&img[i][0], &img[i][1], img_width);
+
+        /* Note that unfiltering works on groups of 3 RGB pixels; not bytes individually */
+        switch(filter_type){
+            case PNG_FILTER_SUB:
+                /* Filter SUB starts at index 1 because pixels "to the left" of index 0 are assumed zero */
+                for(int pix = 3; pix<encoded_width-1; pix+=3){
+                    unfiltered_img[i][pix]   += unfiltered_img[i][pix-3];
+                    unfiltered_img[i][pix+1] += unfiltered_img[i][pix-2];
+                    unfiltered_img[i][pix+2] += unfiltered_img[i][pix-1];
+                }
+                break;
+            
+            case PNG_FILTER_UP:
+                if(0 != line_count){
+                    /* Filter UP starts at row 1 because pixels "above" index 0 are assumed zero */
+                    for(int pix = 0; pix<encoded_width-1; pix+=3){
+                        unfiltered_img[i][pix]   += unfiltered_img[i-1][pix];
+                        unfiltered_img[i][pix+1] += unfiltered_img[i-1][pix+1];
+                        unfiltered_img[i][pix+2] += unfiltered_img[i-1][pix+2];
+                    }
+                }
+                break;
+            
+            case PNG_FILTER_AVERAGE:
+            case PNG_FILTER_PAETH:
+            case PNG_FILTER_NONE:
+            default:
+                printf("Filter method [%d] is NONE or unfilter not yet implemented\n", filter_type);
+                break;
+        }
     }
 
     printf("\n");
@@ -386,7 +440,6 @@ int png_process_IDAT(struct chunk_hdr *chunk, struct png_img *png)
     uint16_t check =   ((zhdr->zlib_comp_method.word) << 8 | zhdr->flags.word) % 31;
 
     printf("\nIDAT chunk:\n");
-
     /* Verify crc32 (returned as big-endian) */
     crc = crc32(0, Z_NULL, 0);
     crc = crc32(crc, (void *)&chunk->type, swap32(chunk->len)+4);   /* +4 to include length of the "type" field */
@@ -442,13 +495,12 @@ int png_process_IDAT(struct chunk_hdr *chunk, struct png_img *png)
     if(-1 == unfiltered_len) 
         return -1;
 
-    printf("Data after unfilter\n");
-    png_print_data(png, 0, unfiltered_len);    /* FIXME: Debug dump of the buffer */
+    //png_print_data(png, 0, unfiltered_len);    /* FIXME: Debug dump of the buffer */
     
     /* Validation checks out; update our location pointers and length meta data */
     png->data_next = (uint8_t *)(((void *)png->data) + unfiltered_len);
     png->data_len += unfiltered_len;
-    //FIXME: Resize check here
+    //FIXME: Resize check here for later IDAT structures
 
     is_first_idat = 0;
     return 0;
@@ -489,6 +541,22 @@ int png_walk(struct png_hdr *png, struct chunk_list *chunks)
     
     return ret;
 }
+
+
+int png_write_raw_img(struct png_img *png)
+{
+    unsigned int len = swap32(png->ihdr->width)*swap32(png->ihdr->height)*3;
+    
+    int fd = open("img.data", O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR | S_IWUSR);
+    if(-1 == fd)
+        return -1;
+    
+    if(len != write(fd, png->data, len))
+        printf("Failed to write img file\n");
+    
+    return close(fd);
+}
+
 
 /* Array of handlers for the various function chunks; this eases the install process for supporting new chunk types */
 struct chunk_handler {
@@ -552,7 +620,7 @@ int png_process_chunks(struct chunk_list *chunks)
             break;
     }
 
-    //FIXME: Freeing for now to prevent memory leak, but what to do with buf here?
+    png_write_raw_img(&png);
     free(png.data);
     return ret;
 }
