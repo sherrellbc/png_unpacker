@@ -15,6 +15,7 @@
 #define PNG_HDR_SIG     0x474e5089 /* 'G' 'N' 'P' 0x89 */
 #define PNG_CHUNK_IHDR  0x52444849 /* 'R' 'D' 'H' 'I'  */
 #define PNG_CHUNK_PLTE  0x45544c50 /* 'E' 'T' 'L' 'P'  */
+#define PNG_CHUNK_tIME  0x454d4974 /* 'E' 'M' 'I' 't'  */
 #define PNG_CHUNK_IDAT  0x54414449 /* 'T' 'A' 'D' 'I'  */
 #define PNG_CHUNK_IEND  0x444e4549 /* 'D' 'N' 'E' 'I'  */
 
@@ -72,7 +73,7 @@ struct chunk_list {
     unsigned int count;
 };
 
-struct chunk_ihdr {
+struct chunk_IHDR {
     uint32_t width;
     uint32_t height;
     uint8_t bit_depth;
@@ -82,7 +83,16 @@ struct chunk_ihdr {
     uint8_t interlace_method;
 } __attribute__((packed));
 
-struct chunk_plte {
+struct chunk_tIME {
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+} __attribute__((packed));
+
+struct chunk_PLTE {
     struct {
         uint8_t red;
         uint8_t blue;
@@ -91,10 +101,10 @@ struct chunk_plte {
 } __attribute__((packed));
 
 struct png_img {
-    struct chunk_ihdr *ihdr;
+    struct chunk_IHDR *ihdr;
     uint8_t *data;
     uint8_t *data_next;     /* A pointer into the data buffer indictating the next available slot */
-    int buf_len;          /* Total available length in data buffer */
+    int buf_len;            /* Total available length in data buffer */
     int data_len;           /* Currently _used_ length in data buffer */
 };
 
@@ -160,20 +170,45 @@ struct zlib_hdr {
 const char *g_common_invalid_str = "INVALID! ERROR";
 
 uint32_t swap32(uint32_t val);
+uint16_t swap16(uint16_t val);
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 inline uint32_t swap32(uint32_t val)
 {
     val = ((val << 8) & 0xFF00FF00 ) | ((val >> 8) & 0xFF00FF ); 
     return (val << 16) | (val >> 16);
 }
+
+
+inline uint16_t swap16(uint16_t val)
+{
+    return ((val >> 8) | val << 8);
+}
 #else
 inline uint32_t swap32(uint32_t val){ return val };
+inline uint16_t swap16(uint16_t val){ return val };
 #endif
 
 int is_png(void *img);
 inline int is_png(void *img)
 {
     return (PNG_HDR_SIG == ((struct png_hdr *)img)->magic);
+}
+
+
+int png_print_data(struct png_img *png, int offset, int len)
+{
+    uint8_t *buf = (uint8_t *) (((void *)png->data + offset));
+    int modulo = swap32(png->ihdr->width);
+    int i, line;
+
+    for(i=0,line=0; i<len; i+=3){
+        if(0 == i%modulo){
+            printf("\n[%d]\t", line++);
+        }
+
+        printf("[%0.2x%0.2x%0.2x] ", buf[i], buf[i+1], buf[i+2]);
+    }
+    printf("\n");
 }
 
 
@@ -215,9 +250,9 @@ int png_prepare(const char *file, int *fd, void **img, size_t *len)
 }
 
 
-int png_process_ihdr(struct chunk_hdr *chunk, struct png_img *png)
+int png_process_IHDR(struct chunk_hdr *chunk, struct png_img *png)
 {
-    struct chunk_ihdr *ihdr = (struct chunk_ihdr *)chunk->data;
+    struct chunk_IHDR *ihdr = (struct chunk_IHDR *)chunk->data;
 
     printf("\nIHDR chunk:\n");
     printf("\tWidth           :\t%u\n", swap32(ihdr->width));
@@ -243,8 +278,20 @@ int png_process_ihdr(struct chunk_hdr *chunk, struct png_img *png)
 }
 
 
-int png_process_plte(struct chunk_hdr *chunk)
-{
+int png_process_tIME(struct chunk_hdr *chunk, struct png_img *png)
+{ (void)png;
+
+    const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    struct chunk_tIME *time = (struct chunk_tIME *)chunk->data;
+    printf("\ntIME chunk\n\tLast modified: %s %u, %u %u:%u:%u UTC\n\n", 
+        months[time->month-1], time->day, swap16(time->year), time->hour, time->minute, time->second);
+    return 0;
+}
+
+
+int png_process_PLTE(struct chunk_hdr *chunk, struct png_img *png)
+{ (void)png;
+
     printf("\nPLTE chunk:\n");
     printf("\t%u entries\n", swap32(chunk->len)); 
 
@@ -294,24 +341,33 @@ int png_inflate_chunk(uint8_t *dest, int dlen, uint8_t *src, int slen)
 }
 
 
-int png_unfilter(uint8_t *buf, int inflate_len, int img_width)
+/*
+ * Unfilter image data in place
+ * @param buf         : Buffer containing filter-encoded image data
+ * @param len         : Length of buffer data to unfilter
+ * @param img_width   : Column width for the final image
+ * @return            : New length of data after removing filter encodings
+ */
+int png_unfilter(uint8_t *buf, int len, int img_width)
 {
-    printf("Unfilter not yet implemented\n");
-    return inflate_len;
-//    int i;
-//    int scanline_count = swap32(img_width)+1;
-//    uint8_t (*img)[scanline_count] = (uint8_t(*)[scanline_count]) buf;
-//
-//    printf("Width: %d\n", img_width);
-//    for(i=0; i<10; i++){
-//        printf("Line %4d: FilterType[%d]=%s\n", i, img[i][0], g_png_filter_types[img[i][0]]);
-//    }
-//
-//    return 0;
+    int i;
+    int encoded_width = img_width*3+1;   /* +1 byte for encoded filter type */
+    int line_count = len/encoded_width;
+    uint8_t (*img)[encoded_width] = (uint8_t(*)[encoded_width]) buf;
+
+    /* We assume the color space is RGB with 8-bit depth for simplicity */
+    printf("Line filter modes:\n");
+    for(i=0; i<line_count; i++){   
+        printf("Line %4d: FilterType[%d]=%s\n", i, img[i][0], g_png_filter_types[img[i][0]]);
+        memmove(&img[i][0], &img[i][1], img_width);
+    }
+
+    printf("\n");
+    return line_count*(encoded_width-1);  /* Basically len - 1 byte per line for the filter encoding */
 }
 
 
-int png_process_idat(struct chunk_hdr *chunk, struct png_img *png)
+int png_process_IDAT(struct chunk_hdr *chunk, struct png_img *png)
 {
     static int is_first_idat = 1;
     struct zlib_hdr *zhdr = (struct zlib_hdr *)chunk->data;
@@ -381,16 +437,13 @@ int png_process_idat(struct chunk_hdr *chunk, struct png_img *png)
     printf("\t\t\tInflated data length :\t%d\n", inflate_len);
     printf("\t\t\tCompression Ratio    :\t%.2f\n", inflate_len/(float)swap32(chunk->len));
 
-    /* FIXME: Debug dump of the buffer */
-//    printf("\n\n");
-//    for(int i=0; i<inflate_len; i++)
-//        printf("%0.2x ", png->data_next[i]);
-//    printf("\n");
-
     /* Parse/remove filters and any associated encoding data; return _actual_ data length consumed */
-    unfiltered_len = png_unfilter(png->data_next, inflate_len, png->ihdr->width);
-    if(0 != unfiltered_len) 
+    unfiltered_len = png_unfilter(png->data_next, inflate_len, swap32(png->ihdr->width));
+    if(-1 == unfiltered_len) 
         return -1;
+
+    printf("Data after unfilter\n");
+    png_print_data(png, 0, unfiltered_len);    /* FIXME: Debug dump of the buffer */
     
     /* Validation checks out; update our location pointers and length meta data */
     png->data_next = (uint8_t *)(((void *)png->data) + unfiltered_len);
@@ -431,45 +484,70 @@ int png_walk(struct png_hdr *png, struct chunk_list *chunks)
         if(PNG_CHUNK_IEND == chunk->type)
             break;
 
-        chunk = (struct chunk_hdr *)((void *)chunk + sizeof(struct chunk_hdr) + 4 + swap32(chunk->len)); //FIXME: crc32 +4
+        chunk = (struct chunk_hdr *)((void *)chunk + sizeof(struct chunk_hdr) + 4 + swap32(chunk->len)); //FIXME: +4 for crc32
     }
     
     return ret;
 }
 
+/* Array of handlers for the various function chunks; this eases the install process for supporting new chunk types */
+struct chunk_handler {
+    uint32_t type;
+    int (*handler)(struct chunk_hdr *chunk, struct png_img *png);
+}g_chunk_handlers[] = 
+    {
+        {
+            .type = PNG_CHUNK_IHDR,
+            .handler = png_process_IHDR
+        },
+
+        {
+            .type = PNG_CHUNK_PLTE,
+            .handler = png_process_PLTE
+        },
+
+        {
+            .type = PNG_CHUNK_tIME,
+            .handler = png_process_tIME
+        },
+
+        {
+            .type = PNG_CHUNK_IDAT,
+            .handler = png_process_IDAT
+        },
+    };
+
 
 int png_process_chunks(struct chunk_list *chunks)
 {
     struct png_img png = {0};
-    int i;
+    int i,j;
     int ret = 0;
     
     /* Process each discovered chunk */
     for(i=0; i<chunks->count; i++){
-        switch(chunks->addrs[i]->type){
-            case PNG_CHUNK_IHDR:
-                ret = png_process_ihdr(chunks->addrs[i], &png);
+        for(j=0; j<sizeof(g_chunk_handlers)/sizeof(struct chunk_handler); j++){
+            if(g_chunk_handlers[j].type == chunks->addrs[i]->type){
+                ret = g_chunk_handlers[j].handler(chunks->addrs[i], &png);
                 break;
+            }
+        }
 
-            case PNG_CHUNK_PLTE:
-                ret = png_process_plte(chunks->addrs[i]);
-                break;
-        
-            case PNG_CHUNK_IDAT:
-                ret = png_process_idat(chunks->addrs[i], &png); 
-                break;
-
-            case PNG_CHUNK_IEND:
+        /* Check for the case where no handler was found */
+        if(sizeof(g_chunk_handlers)/sizeof(struct chunk_handler) == j){
+            /* Special case IEND chunk */
+            if(PNG_CHUNK_IEND == chunks->addrs[i]->type){
                 printf("Processed %d chunks\n", i);
                 break;
-
-            default:
+            }else{
                 printf("Unhandled chunk type: 0x%x \"%c%c%c%c\"\n", chunks->addrs[i]->type,
                     ((char *)&chunks->addrs[i]->type)[0], ((char *)&chunks->addrs[i]->type)[1], 
                     ((char *)&chunks->addrs[i]->type)[2], ((char *)&chunks->addrs[i]->type)[3]);
-                break;
+                continue;
+            }
         }
 
+        /* Failure mode check */
         if(0 != ret)
             break;
     }

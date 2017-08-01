@@ -1,6 +1,6 @@
 all: unpacker
 run: unpacker
-	./unpacker imgs/tiny.png
+	./unpacker imgs/simple.png
 
 LDFLAGS=    -lm -lz
 CFLAGS=     -g
