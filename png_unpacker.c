@@ -213,8 +213,7 @@ int png_print_data(struct png_img *png, int offset, int len)
         if(0 == i%width){
             printf("\n[%d]\t", line++);
         }
-
-        printf("[%0.2x%0.2x%0.2x] ", buf[i], buf[i+1], buf[i+2]);
+        printf("[%0.2x%0.2x%0.2x] ", buf[i+line-1], buf[i+1+line-1], buf[i+2+line-1]);
     }
     printf("\n");
 }
