@@ -196,6 +196,12 @@ inline uint32_t swap32(uint32_t val){ return val };
 inline uint16_t swap16(uint16_t val){ return val };
 #endif
 
+
+/*
+ * Check whether the passed file is a valid PNG
+ * @param img   : Pointer to the data
+ * @return      : 0 on failure
+ */ 
 int is_png(void *img);
 inline int is_png(void *img)
 {
@@ -203,7 +209,13 @@ inline int is_png(void *img)
 }
 
 
-int png_print_data(struct png_img *png, int offset, int len)
+/*
+ *  A simple (hacky) function to print image RGB/pixel data
+ * @param png       : PNG structure containing the image data
+ * @param offset    : Offset into the data to begin printing
+ * @param len       : Length of data to print
+ */
+void png_print_data(struct png_img *png, int offset, int len)
 {
     uint8_t *buf = (uint8_t *) (((void *)png->data + offset));
     int width = swap32(png->ihdr->width);
@@ -219,6 +231,15 @@ int png_print_data(struct png_img *png, int offset, int len)
 }
 
 
+/*
+ * Open the file, map it into our address space, and determine if it
+ * is a proper PNG file
+ * @param file  : PNG file to open
+ * @param fd    : Reference to the desired location of the resulting descriptor
+ * @param img   : Reference to a pointer to contain the resulting map
+ * @param len   : Reference to the desired location of the mapping size
+ * @return      : -1 on failure, otherwise 0 with populated reference parameters
+ */
 int png_prepare(const char *file, int *fd, void **img, size_t *len)
 {
     int lfd;
@@ -257,6 +278,12 @@ int png_prepare(const char *file, int *fd, void **img, size_t *len)
 }
 
 
+/*
+ * Function to process the IHDR chunk
+ * @param chunk : Pointer to the chunk to process
+ * @param png   : Pointer to png structure to which the results will be saved
+ * @return      : -1 on failure
+ */
 int png_process_IHDR(struct chunk_hdr *chunk, struct png_img *png)
 {
     struct chunk_IHDR *ihdr = (struct chunk_IHDR *)chunk->data;
@@ -285,6 +312,12 @@ int png_process_IHDR(struct chunk_hdr *chunk, struct png_img *png)
 }
 
 
+/*
+ * Function to process the tIME chunk
+ * @param chunk : Pointer to the chunk to process
+ * @param png   : Pointer to png structure to which the results will be saved
+ * @return      : -1 on failure
+ */
 int png_process_tIME(struct chunk_hdr *chunk, struct png_img *png)
 { (void)png;
 
@@ -296,6 +329,12 @@ int png_process_tIME(struct chunk_hdr *chunk, struct png_img *png)
 }
 
 
+/*
+ * Function to process the PLTE chunk
+ * @param chunk : Pointer to the chunk to process
+ * @param png   : Pointer to png structure to which the results will be saved
+ * @return      : -1 on failure
+ */
 int png_process_PLTE(struct chunk_hdr *chunk, struct png_img *png)
 { (void)png;
 
@@ -482,6 +521,12 @@ int png_unfilter(uint8_t *buf, int len, int img_width)
 }
 
 
+/*
+ * Function to process the IDAT chunk
+ * @param chunk : Pointer to the chunk to process
+ * @param png   : Pointer to png structure to which the results will be saved
+ * @return      : -1 on failure
+ */
 int png_process_IDAT(struct chunk_hdr *chunk, struct png_img *png)
 {
     static int is_first_idat = 1;
@@ -558,7 +603,8 @@ int png_process_IDAT(struct chunk_hdr *chunk, struct png_img *png)
     if(-1 == unfiltered_len) 
         return -1;
 
-//    png_print_data(png, 0, unfiltered_len);    /* FIXME: Debug dump of the buffer */
+/* Uncomment me to print the decoded data */
+//    png_print_data(png, 0, unfiltered_len)
     
     /* Validation checks out; update our location pointers and length meta data */
     png->data_next = (uint8_t *)(((void *)png->data) + unfiltered_len);
@@ -570,6 +616,12 @@ int png_process_IDAT(struct chunk_hdr *chunk, struct png_img *png)
 }
 
 
+/*
+ * Walk the PNG file and locate all chunks
+ * @param png       : Structure containng PNG data
+ * @param chunks    : Pointer to chunk_list struct to be populated with locations of chunks
+ * @return          : -1 on failure
+ */
 int png_walk(struct png_hdr *png, struct chunk_list *chunks)
 {
     int ret = 0;
@@ -606,8 +658,15 @@ int png_walk(struct png_hdr *png, struct chunk_list *chunks)
 }
 
 
-//FIXME: This is absolutely terrible; the underlying method for handling this data buffer should be reallocated to fix the new unfiltered size
-// - 1 malloc vs "height" number of write syscalls
+/*
+ * Write the resulting decoded PNG image to disk
+ * @param png   : A pointer to the struct containing image data
+ * @return      : -1 on failure
+ *
+ * Notes:
+ *  This is absolutely terrible; the underlying method for handling this data buffer should be reallocated to fix the new unfiltered size
+ *  1 malloc vs "height" number of write syscalls
+ */
 int png_write_raw_img(struct png_img *png)
 {
     unsigned int line_len = swap32(png->ihdr->width)*3; 
@@ -654,6 +713,11 @@ struct chunk_handler {
     };
 
 
+/*
+ * Process each chunk in the list
+ * @param chunks    : An array containing all chunks to process
+ * @return          : -1 on failure
+ */
 int png_process_chunks(struct chunk_list *chunks)
 {
     struct png_img png = {0};
@@ -694,6 +758,11 @@ int png_process_chunks(struct chunk_list *chunks)
 }
 
 
+/*
+ * Begin decoding the PNG
+ * @param file  : Filename of the image to decode as PNG
+ * @return      : -1 on failure
+ */
 int png_decode(const char *file)
 {
     int fd, ret = 0;
